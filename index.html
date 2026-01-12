@@ -1,0 +1,325 @@
+<html>
+<head>
+  <title>three-glb-walking-demo</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+    }
+  </style>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="relative container mx-auto h-screen">
+    <h1 class="absolute top-0 left-0 text-4xl font-bold text-white z-10">ThreeJs GLB Walking Demo</h1>
+    <canvas id="canvas-three" class="absolute top-0 left-0 w-full h-full">
+    </canvas>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import Stats from 'three/addons/libs/stats.module.js';
+
+    const CURSOR_OPACITY = 0.5;
+    const MOVE_SPEED = 0.5;
+    const CURSOR_FADE_SPEED = 1.0;
+
+    const canvas = document.querySelector('#canvas-three');
+    const scene = new THREE.Scene();
+    let camera = new THREE.PerspectiveCamera(
+      45,
+      canvas.clientWidth / canvas.clientHeight,
+      0.1,
+      1000
+    );
+    const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+    renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+
+    let stats = new Stats();
+    window.document.body.appendChild(stats.dom);
+
+    let mixer = null;
+    let idleAction = null;
+    let walkAction = null;
+    let ashigaruGroup = new THREE.Group();
+    let isMoving = false;
+    let targetPosition = null; // moving target position
+    let isCursorFadingOut = false;
+
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    const cursorObject = new THREE.Mesh(
+      new THREE.ConeGeometry(0.1, 0.4, 8),
+      new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: CURSOR_OPACITY })
+    );
+    cursorObject.scale.y = -1;
+    cursorObject.visible = false;
+    scene.add(cursorObject);
+
+    // default light
+    scene.add(new THREE.AmbientLight(0xe0e0e0, 1));
+    scene.background = new THREE.Color(0xe2e2e2);
+
+    // load glb files
+    const loader = new GLTFLoader();
+    const glbNameList = [
+      { key: 'base', file_name: 'koguchi_demo.glb' }, // base model(include camera, light)
+      { key: 'ashigaru', file_name: 'ashigaru_v2.0.glb' }, // walking model
+    ];
+    const glbObj = {
+      base: null,
+      ashigaru: null,
+    };
+    
+    (async () => {
+      for (const glb of glbNameList) {
+        try {
+          const gltf = await loader.loadAsync(`./assets/${glb.file_name}`);
+          glbObj[glb.key] = gltf;
+        } catch (error) {
+          console.error(`Error loading GLB: ${glb}`, error);
+        }
+      }
+      
+      // get glb lights
+      const glbLights = [];
+      glbObj.base.scene.traverse(object => {
+        if (object instanceof THREE.DirectionalLight) {
+          glbLights.push(object);
+        }
+      });
+
+      // adjust glb lights
+      if (glbLights.length > 0) {
+        glbLights.forEach(light => {
+          light.intensity /= 683
+        });
+      }
+
+      // get glb models
+      glbObj.base.scene.children.forEach(child => {
+        scene.add(child.clone());
+      });
+      glbObj.ashigaru.scene.children.forEach(child => {
+        // Create Group instead of clone() because cloning armature breaks animation
+        ashigaruGroup.add(child);
+      });
+      // adjust walking model
+      ashigaruGroup.scale.set(0.25, 0.25, 0.25);
+      ashigaruGroup.position.set(-1.5, ashigaruGroup.position.y, 2.5);
+      ashigaruGroup.rotation.set(0, 45 * (Math.PI / 180), 0);
+      scene.add(ashigaruGroup);
+      
+      // get glb camera
+      let glbCamera = null;
+      if (glbObj.base.cameras?.length > 0) {
+        glbCamera = glbObj.base.cameras[0];
+      } else {
+        glbObj.base.scene.traverse((object) => {
+          if (object instanceof THREE.PerspectiveCamera && !glbCamera) {
+            glbCamera = object;
+          }
+        });
+      }
+
+      // set secne camera
+      if (glbCamera) {
+        camera.fov = glbCamera.fov;
+        camera.aspect = canvas.clientWidth / canvas.clientHeight;
+        camera.near = glbCamera.near;
+        camera.far = glbCamera.far;
+        camera.updateProjectionMatrix();
+        camera.position.copy(glbCamera.position);
+        camera.rotation.copy(glbCamera.rotation);
+        camera.quaternion.copy(glbCamera.quaternion);
+        if (glbCamera.target) {
+          camera.lookAt(glbCamera.target);
+        }
+      }
+
+      // set glb animation
+      if (glbObj.ashigaru.animations?.length > 0) {
+        mixer = new THREE.AnimationMixer(scene);
+        // idle animation
+        idleAction = mixer.clipAction(glbObj.ashigaru.animations?.find(animation => animation.name === 'idle'));
+        // walk animation
+        if (glbObj.ashigaru.animations.length > 1) {
+          walkAction = mixer.clipAction(glbObj.ashigaru.animations?.find(animation => animation.name === 'walk'));
+        }
+        if (idleAction) {
+          idleAction.play();
+        }
+      }
+    })();
+
+    // animation loop
+    const clock = new THREE.Clock();
+    function animate() {
+      requestAnimationFrame(animate);
+      
+      const delta = clock.getDelta();
+      if (mixer) {
+        mixer.update(delta);
+      }
+      
+      // cursor obuject fade out
+      if (isCursorFadingOut && cursorObject.visible) {
+        const currentOpacity = cursorObject.material.opacity;
+        const newOpacity = Math.max(0, currentOpacity - CURSOR_FADE_SPEED * delta);
+        cursorObject.material.opacity = newOpacity;
+        
+        if (newOpacity <= 0) {
+          cursorObject.visible = false;
+          isCursorFadingOut = false;
+        }
+      }
+      
+      // walking animation
+      if (isMoving && targetPosition) {
+        const currentPos = ashigaruGroup.position;
+        const direction = new THREE.Vector3().subVectors(targetPosition, currentPos);
+        const distance = direction.length();
+
+        if (distance > 0.01) {
+          // while walking
+          const moveDistance = MOVE_SPEED * delta;
+          direction.normalize();
+          ashigaruGroup.position.add(direction.multiplyScalar(moveDistance));
+        } else {
+          // end walking
+          isMoving = false;
+          targetPosition = null;
+          
+          if (walkAction) {
+            walkAction.stop();
+          }
+          if (idleAction) {
+            idleAction.reset();
+            idleAction.play();
+          }
+        }
+      }
+
+      stats?.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    /**
+     * Check if cursor position intersects with walkable area object
+     */
+    function checkWalkAreaIntersection(mouseX, mouseY) {
+      const rect = canvas.getBoundingClientRect();
+      mouse.x = (mouseX / rect.width) * 2 - 1;
+      mouse.y = -(mouseY / rect.height) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      const walkArea = scene.children.find(child => child.name === 'bridge');
+      
+      if (!walkArea) {
+        return null;
+      }
+      
+      return raycaster.intersectObject(walkArea, true);
+    }
+
+    /**
+     * Check if cursor position is walkable
+     * Walkable: cursor pointer
+     * Not walkable: cursor not-allowed
+     */
+    function toggleCursor(event) {
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      
+      if (x < 0 || x > rect.width || y < 0 || y > rect.height) {
+        canvas.style.cursor = 'default';
+        return;
+      }
+      
+      const intersects = checkWalkAreaIntersection(x, y);
+      
+      if (intersects?.length > 0) {
+        canvas.style.cursor = 'pointer';
+      } else {
+        canvas.style.cursor = 'not-allowed';
+      }
+    }
+
+    canvas.addEventListener('mousemove', event => {
+      toggleCursor(event);
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+      canvas.style.cursor = 'default';
+    });
+
+    /**
+     * Start moving model to cursor position on canvas click
+     */
+    function moveModelToCursorPosition(event) {
+      if (isMoving) {
+        return;
+      }
+      if (!(idleAction && walkAction)) {
+        return;
+      }
+      
+      // detect cursor position
+      const rect = canvas.getBoundingClientRect();
+      const intersects = checkWalkAreaIntersection(
+        event.clientX - rect.left,
+        event.clientY - rect.top
+      );
+      
+      if (intersects?.length > 0) {
+        // move cursor object
+        const hitPoint = intersects[0].point;
+        cursorObject.position.copy(hitPoint);
+        cursorObject.position.y = 0.2;
+        cursorObject.material.opacity = CURSOR_OPACITY; // reset opacity
+        cursorObject.visible = true;
+        isCursorFadingOut = false;
+        
+        const currentPos = ashigaruGroup.position.clone();
+        const direction = new THREE.Vector3().subVectors(hitPoint, currentPos);
+        direction.y = 0;
+        
+        if (direction.length() > 0.01) {
+          // Change direction of movement
+          const angle = Math.atan2(direction.x, direction.z);
+          ashigaruGroup.rotation.y = angle;
+          
+          // start walking
+          targetPosition = hitPoint.clone();
+          isMoving = true;
+          idleAction.stop();
+          walkAction.reset();
+          walkAction.play();
+          isCursorFadingOut = true;
+        }
+      }
+    }
+
+    canvas.addEventListener('click', event => moveModelToCursorPosition(event));
+
+    window.addEventListener('resize', () => {
+      camera.aspect = canvas.clientWidth / canvas.clientHeight;
+      camera.updateProjectionMatrix();
+    });
+  </script>
+</body>
+</html>
