@@ -4,8 +4,8 @@ Minimal three.js demo with a hand-rigged GLB character.
 Click to move the character using simple raycasting.
 
 ## Demo
-URL:
-Video:
+- URL: https://github.com/hokugo-dev/three-glb-walk
+- Video: https://x.com/HokugoW/status/2010549158307102748
 
 ## Features
 - Pure CDN three.js
